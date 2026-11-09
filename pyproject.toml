@@ -1,0 +1,28 @@
+[project]
+name = "insv-odometry"
+version = "0.1.0"
+description = "Extract IMU odometry (orientation) and camera calibration from Insta360 .insv files"
+readme = "README.md"
+authors = [
+    { name = "sarin", email = "sarin.c.jacob2001@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "av>=19.0.2",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "scipy>=1.18.1",
+    "telemetry-parser>=0.4.0",
+]
+
+[project.scripts]
+insv-odometry = "insv_odometry.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.10,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

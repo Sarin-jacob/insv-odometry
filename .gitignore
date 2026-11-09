@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+out/
+*.png
+
+# Data: never commit footage, telemetry or results
+data/
+*.insv
+*.insp
+*.lrv
+*.mp4
+*.mov
+*.MP4
+*.LRV
+*.csv
+*.ply
+*.json
+*.jpg
+*.jpeg
+*.npz
+.pytest_cache/

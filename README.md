@@ -65,8 +65,21 @@ Phase 2 checks both against visual rotation.
    - Recover **metric scale** by fitting SfM camera accelerations (spline second derivative) to IMU
      specific force minus gravity.
    - Optional: IMU rotation priors in bundle adjustment for weak-texture segments.
-4. **Dense / appearance.** Gaussian splatting (`gsplat`/nerfstudio) on the posed pinhole views,
-   or COLMAP MVS for a point cloud/mesh. Needs a CUDA GPU, so it runs on the GPU host if not
-   locally.
-5. **Outputs.** Metric-scaled trajectory (TUM), sparse + dense point cloud (`.ply`), splat, and a
+4. **Dense.** CPU-only first: the current host has an i5-12500, 16 GB RAM and no CUDA GPU.
+   - Use OpenMVS (CPU) densify and mesh on the posed pinhole views, at reduced resolution.
+   - COLMAP PatchMatch MVS and Gaussian splatting need CUDA, so they are deferred to a GPU host.
+5. **Outputs.** Metric-scaled trajectory (TUM), sparse + dense point cloud (`.ply`), and a
    comparison plot of SfM rotation vs IMU rotation.
+
+### Dive lens / underwater footage
+
+The camera is also used with the Insta360 dive lens. Behind a port in water, refraction changes
+the effective focal length and distortion, so the factory air calibration in the file does not
+hold.
+- Phase 1 orientation does not depend on lens calibration and is unaffected.
+- The `offset_states` metadata field shows the lens mode. The test clip reads `Common`, meaning
+  normal mode, shot in air.
+- For dive footage: start from the factory model, let bundle adjustment refine focal length and
+  distortion per lens (self-calibration), and keep the rig rotation fixed.
+- If self-calibration is unstable (low texture, turbid water), calibrate once with a checkerboard
+  filmed underwater through the dive lens and use that model instead.

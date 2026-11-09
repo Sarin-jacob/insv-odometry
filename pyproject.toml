@@ -18,6 +18,13 @@ dependencies = [
 [project.scripts]
 insv-odometry = "insv_odometry.cli:main"
 
+[project.optional-dependencies]
+recon = [
+    "opencv-python-headless>=5.0.0.93",
+    "pillow>=13.0.0",
+    "pycolmap>=4.2.1",
+]
+
 [build-system]
 requires = ["uv_build>=0.9.10,<0.10.0"]
 build-backend = "uv_build"

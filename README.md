@@ -43,33 +43,72 @@ World frame: Z up; yaw = 0 at the start of the clip.
   Translation must come from the video (phase 2), with the IMU giving rotation priors and metric
   scale.
 
-Not yet verified:
-- the exact IMU→lens rotation (rig says `imu_from_rig` = identity, Insta360 also stores
-  `imu_turn_ypr` = [0.1, 0.2, 90.5]°)
-- the IMU↔video time offset
+Phase 2 checks these against visual rotation:
+- **Time offset:** the IMU↔video offset is −2 ms.
+- **IMU frame:** the normalized IMU frame is an axis permutation of the lens-0 camera frame.
+  `fusion.json` holds the estimated rotation, accurate to 0.12° per step.
 
-Phase 2 checks both against visual rotation.
+## Phase 2: 3D reconstruction fused with IMU
 
-## Phase 2: 3D reconstruction with IMU (plan)
+```bash
+uv sync --extra recon
+uv run --extra recon insv-odometry recon path/to/VID_XXXXXXXX_XXXXXX_00_XXX.insv
+```
 
-1. **Frames → virtual pinhole views.** Decode both fisheye tracks with PyAV. Reproject each lens
-   with its Mei calibration into 4–6 pinhole views (≈90° FOV each). All views share the known lens
-   extrinsics, so each time step is one multi-camera rig.
-2. **SfM with rig constraints.** Run COLMAP/GLOMAP via `pycolmap` (rig + frame support), sequential
-   matching (ALIKED/LightGlue or SIFT). Subsample to ~5–10 fps. 458 frames at 30 fps is far more
-   than SfM needs.
-3. **Fuse IMU.**
-   - Check sync and extrinsics: cross-correlate SfM angular velocity with the gyro to get the time
-     offset, then solve hand-eye for IMU→rig rotation.
-   - Gravity-align the reconstruction (Z up).
-   - Recover **metric scale** by fitting SfM camera accelerations (spline second derivative) to IMU
-     specific force minus gravity.
-   - Optional: IMU rotation priors in bundle adjustment for weak-texture segments.
-4. **Dense.** CPU-only first: the current host has an i5-12500, 16 GB RAM and no CUDA GPU.
-   - Use OpenMVS (CPU) densify and mesh on the posed pinhole views, at reduced resolution.
-   - COLMAP PatchMatch MVS and Gaussian splatting need CUDA, so they are deferred to a GPU host.
-5. **Outputs.** Metric-scaled trajectory (TUM), sparse + dense point cloud (`.ply`), and a
-   comparison plot of SfM rotation vs IMU rotation.
+Options:
+- `--step N`: use every Nth video frame (default 6, which is 5 fps)
+- `--size`: virtual view size in px (default 768)
+- `--max-features`, `--overlap`: SfM feature count and sequential matching overlap
+- `--refine-rig`: let bundle adjustment refine the lens-to-lens extrinsics
+- `--stages render,sfm,fuse`: run only some stages; later stages reuse the work folder
+
+The pipeline is CPU-only (pycolmap wheel, no CUDA). Work goes to `out/<stem>/recon/`.
+
+1. **render.** Both fisheye tracks are decoded and reprojected into **10 virtual pinhole views**
+   (5 per lens: centre + 4 tilted 50°, 90° FOV) using the factory lens model.
+   - Lens model: Mei unified model, `xi` + radtan from `offset_v3`, rescaled for the window crop.
+   - Each view keeps its lens's optical centre, so the rig is exact, including the 3.35 cm offset
+     between lenses.
+   - Masks give every scene direction to exactly one view.
+   - `equirect_*.jpg` stitches both lenses for a visual check of the lens model and extrinsics.
+2. **sfm.** pycolmap rig SfM:
+   - SIFT features, sequential matching with rig verification
+   - `filter_stationary_matches` drops features that move with the camera (the operator)
+   - incremental mapping with fixed intrinsics and rig
+3. **fuse.** IMU fusion (`fusion.json`, `fusion.png`, `cloud.png`):
+   - IMU↔video **time offset**: minimise per-step rotation-angle mismatch, SfM vs gyro
+   - **camera→IMU rotation**: Kabsch on per-step rotation vectors
+   - **gravity alignment**: Z up, from the gravity-corrected IMU orientation
+   - **metric scale + accel bias**: second differences of SfM positions equal the
+     triangle-weighted mean of IMU world acceleration, which gives an exact linear fit
+
+Outputs: `trajectory_metric_tum.txt` (lens-0 camera, metres, Z up), `sparse_points_metric.ply`,
+`sparse_best/` (COLMAP model), `fusion.json`.
+
+### Results on the test clip (X4 Air, 15.3 s, walking with the camera hand-held)
+
+| check | result |
+|---|---|
+| registration | 77/77 frames, 770/770 views, 47k points, 0.86 px mean reprojection |
+| IMU↔video time offset | −2.0 ms (parser timestamps already aligned) |
+| rotation agreement after hand-eye | 0.12° RMS per step, vs 8.6° mean rotation per step |
+| camera→IMU rotation | ≈180° about (x+z)/√2, an axis permutation |
+| metric scale from IMU | **1.008 ± 0.018** (SfM was already metric via the fixed 3.35 cm lens offset; two independent sources agree within 1%) |
+| accel fit | 0.22 m/s² RMS residual on 0.91 m/s² RMS signal |
+| ground plane (gravity check) | 0.88° tilt, 2.6 cm RMS flatness; camera 1.24 m above ground (0.97–1.45 m) |
+| path | 10.0 m walked, 2.5 × 5.4 m extent |
+
+Runtime on an i5-12500 (12 threads): render 42 s, features 103 s, matching 21 min, mapping
+4 min, fusion seconds. Matching dominates. Ways to cut it: `--overlap 4`, `--max-features 1500`,
+or a larger `--step`.
+
+### Next
+
+- **Dense** (CPU): OpenMVS densify and mesh on the posed views. COLMAP PatchMatch MVS and Gaussian
+  splatting need CUDA, so they are deferred to a GPU host.
+- Rolling-shutter correction from the gyro (15.9 ms readout). The pipeline currently ignores it.
+- Tighter gravity alignment: per-frame alignment spread is 1.9° median, coming from Mahony tilt
+  error during walking.
 
 ### Dive lens / underwater footage
 

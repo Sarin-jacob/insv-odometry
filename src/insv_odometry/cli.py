@@ -111,6 +111,14 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--no-plot", action="store_true")
     e.set_defaults(func=extract)
 
+    try:
+        from .recon import pipeline
+    except ImportError:
+        r = sub.add_parser("recon", help="phase 2 (needs: uv sync --extra recon)")
+        r.set_defaults(func=lambda a: sys.exit("Install the recon extra: uv sync --extra recon"))
+    else:
+        pipeline.add_parser(sub)
+
     args = ap.parse_args(argv)
     return args.func(args)
 

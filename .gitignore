@@ -27,3 +27,4 @@ data/
 *.jpeg
 *.npz
 .pytest_cache/
+.claude/

@@ -97,6 +97,19 @@ def extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve(args: argparse.Namespace) -> int:
+    from .serve import serve
+
+    d = Path(args.dir) if args.dir else None
+    if d is None:
+        found = sorted(Path("out").glob("*/recon/viewer/index.html"), key=lambda p: p.stat().st_mtime)
+        if not found:
+            sys.exit("No viewer found under out/*/recon/viewer; run `recon` first or pass a folder.")
+        d = found[-1].parent
+    serve(d, port=args.port, host=args.host)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="insv-odometry", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -110,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="do not subtract gyro bias from the stillest window")
     e.add_argument("--no-plot", action="store_true")
     e.set_defaults(func=extract)
+
+    s = sub.add_parser("serve", help="serve a viewer folder over HTTP (with video seeking)")
+    s.add_argument("dir", nargs="?", help="folder to serve (default: newest out/*/recon/viewer)")
+    s.add_argument("--port", type=int, default=8770)
+    s.add_argument("--host", default="127.0.0.1")
+    s.set_defaults(func=_serve)
 
     try:
         from .recon import pipeline

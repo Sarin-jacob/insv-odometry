@@ -60,7 +60,8 @@ Options:
 - `--size`: virtual view size in px (default 768)
 - `--max-features`, `--overlap`: SfM feature count and sequential matching overlap
 - `--refine-rig`: let bundle adjustment refine the lens-to-lens extrinsics
-- `--stages render,sfm,fuse`: run only some stages; later stages reuse the work folder
+- `--stages render,sfm,fuse,viewer`: run only some stages; later stages reuse the work folder
+- `--video-width`: width of the viewer's 360 video (default 1920)
 
 The pipeline is CPU-only (pycolmap wheel, no CUDA). Work goes to `out/<stem>/recon/`.
 
@@ -82,8 +83,24 @@ The pipeline is CPU-only (pycolmap wheel, no CUDA). Work goes to `out/<stem>/rec
    - **metric scale + accel bias**: second differences of SfM positions equal the
      triangle-weighted mean of IMU world acceleration, which gives an exact linear fit
 
+4. **viewer.** A side-by-side web viewer in `out/<stem>/recon/viewer/`:
+   - **Left:** the 360 video, levelled and world-locked using the fused poses (horizon flat,
+     longitude 0 = overall walking direction).
+   - **Right:** a three.js view of the metric sparse cloud, the camera path, and the moving
+     front/back lens frustums, synced frame-by-frame to playback.
+   - Poses between SfM keyframes come from the gyro, blended between neighbouring keyframes,
+     so the 3D camera moves at the full 30 fps.
+   - View modes: *Follow* chases the camera; dragging switches to free orbit; *Top* is a plan view.
+
+   ```bash
+   uv run insv-odometry serve            # newest out/*/recon/viewer -> http://127.0.0.1:8770/
+   ```
+
+   `serve` supports HTTP Range requests. Python's plain `http.server` does not, so the video
+   could not seek.
+
 Outputs: `trajectory_metric_tum.txt` (lens-0 camera, metres, Z up), `sparse_points_metric.ply`,
-`sparse_best/` (COLMAP model), `fusion.json`.
+`sparse_best/` (COLMAP model), `fusion.json`, `viewer/`.
 
 ### Results on the test clip (X4 Air, 15.3 s, walking with the camera hand-held)
 
@@ -97,9 +114,10 @@ Outputs: `trajectory_metric_tum.txt` (lens-0 camera, metres, Z up), `sparse_poin
 | accel fit | 0.22 m/s² RMS residual on 0.91 m/s² RMS signal |
 | ground plane (gravity check) | 0.88° tilt, 2.6 cm RMS flatness; camera 1.24 m above ground (0.97–1.45 m) |
 | path | 10.0 m walked, 2.5 × 5.4 m extent |
+| viewer reprojection | sparse points projected into the levelled video land on the matching structures (trees, railing, pedestal, ground) |
 
 Runtime on an i5-12500 (12 threads): render 42 s, features 103 s, matching 21 min, mapping
-4 min, fusion seconds. Matching dominates. Ways to cut it: `--overlap 4`, `--max-features 1500`,
+4 min, fusion seconds, viewer video 4 min. Matching dominates. Ways to cut it: `--overlap 4`, `--max-features 1500`,
 or a larger `--step`.
 
 ### Next

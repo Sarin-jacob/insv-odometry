@@ -22,8 +22,9 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     r.add_argument("--max-features", type=int, default=2048)
     r.add_argument("--overlap", type=int, default=6, help="sequential matching overlap (frames)")
     r.add_argument("--refine-rig", action="store_true", help="let BA refine lens-to-lens extrinsics")
-    r.add_argument("--stages", default="render,sfm,fuse",
-                   help="comma list of stages to run (render, sfm, fuse)")
+    r.add_argument("--stages", default="render,sfm,fuse,viewer",
+                   help="comma list of stages to run (render, sfm, fuse, viewer)")
+    r.add_argument("--video-width", type=int, default=1920, help="viewer 360 video width")
     r.set_defaults(func=run)
 
 
@@ -70,5 +71,11 @@ def run(args: argparse.Namespace) -> int:
         if rec is None:
             rec = pycolmap.Reconstruction(str(work / "sparse_best"))
         fuse.run(work, rec, tel, views, lenses)
+
+    if "viewer" in stages:
+        from . import viewer
+
+        out = viewer.build(work, src, tel, lenses, width=args.video_width)
+        print(f"View it: uv run insv-odometry serve \"{out}\"  -> http://127.0.0.1:8770/")
     return 0
 

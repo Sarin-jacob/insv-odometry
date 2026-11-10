@@ -37,3 +37,31 @@ def test_time_offset_recovered():
     R_sc = orientation.to_scipy(orientation.resample(t_imu, q, t_cam + true_dt)).as_matrix()
     dt, _, _ = fuse.estimate_time_offset(t_imu, q, t_cam, R_sc)
     assert abs(dt - true_dt) < 0.002
+
+
+def test_consistent_segments_splits_at_jump():
+    resid = np.array([0.3, 0.5, 40.0, 0.4, 0.2, 0.6, 0.3])  # 8 frames, jump between frames 2 and 3
+    segs = fuse.consistent_segments(resid)
+    assert segs[0] == (3, 8) and segs[1] == (0, 3)
+
+
+def test_robust_hand_eye_ignores_outlier_steps():
+    rng = np.random.default_rng(3)
+    R = Rotation.from_euler("xyz", [5, 88, -3], degrees=True).as_matrix()
+    r_c = rng.normal(scale=0.1, size=(80, 3))
+    r_i = r_c @ R.T
+    r_i[[10, 40]] += 0.7  # two gross outliers (~40 deg)
+    R_est, resid, inl = fuse.robust_hand_eye(r_c, r_i)
+    assert np.degrees(Rotation.from_matrix(R_est.T @ R).magnitude()) < 0.01
+    assert not inl[10] and not inl[40]
+
+
+def test_longest_drift_free_excludes_drifting_part():
+    n = 60
+    R_i = Rotation.from_euler("z", np.linspace(0, 90, n)[:, None], degrees=True).as_matrix()
+    drift = np.zeros(n)
+    drift[20:30] = np.linspace(3, 30, 10)  # 10 steps of ~3 deg extra SfM rotation
+    drift[30:] = 30
+    R_sc = Rotation.from_euler("x", drift[:, None], degrees=True).as_matrix() @ R_i  # world-side drift
+    a, b = fuse.longest_drift_free(R_sc, R_i, np.eye(3), 0, n, 15.0)
+    assert b == n and 25 <= a <= 30  # kept the long stable tail, not the drifting stretch

@@ -60,6 +60,12 @@ def frame_poses(work: Path, tel: Telemetry, t_frames: np.ndarray):
     return pos, q, tk
 
 
+def _auto_downscale(lens: FisheyeLens, target_px_per_rad: float) -> int:
+    # Local copy of views.auto_downscale: a long-running recon process may hold an older
+    # views module when it lazily imports this file at the viewer stage.
+    return max(1, int(lens.fx / (1.0 + lens.xi) / target_px_per_rad))
+
+
 def ground_height(pts: np.ndarray, traj: np.ndarray) -> float:
     d = np.min(np.linalg.norm(pts[:, None, :2] - traj[None, ::4, :2], axis=2), axis=1)
     z = pts[d < 3, 2]
@@ -71,8 +77,9 @@ def ground_height(pts: np.ndarray, traj: np.ndarray) -> float:
 
 def render_video(src: Path, lenses: list[FisheyeLens], R_wc: np.ndarray, yaw0: float,
                  out: Path, width: int = 1920, fps: Fraction = Fraction(30000, 1001), crf: int = 22,
-                 downscale: int = 2) -> None:
-    """World-locked, horizon-level equirectangular video. Longitude 0 looks along `yaw0`."""
+                 downscale: int | None = None, start: int = 0) -> None:
+    """World-locked, horizon-level equirectangular video of frames [start, start + len(R_wc)).
+    Longitude 0 looks along `yaw0`."""
     h = width // 2
     lon = (np.arange(width) + 0.5) / width * 2 * np.pi - np.pi
     lat = np.pi / 2 - (np.arange(h) + 0.5) / h * np.pi
@@ -81,6 +88,8 @@ def render_video(src: Path, lenses: list[FisheyeLens], R_wc: np.ndarray, yaw0: f
     d_world = np.stack([np.cos(lat) * np.cos(az), np.cos(lat) * np.sin(az), np.sin(lat)], -1)
     d_world = d_world.reshape(-1, 3).astype(np.float64)
     axes = np.stack([L.rig_from_lens_R[:, 2] for L in lenses])
+    if downscale is None:
+        downscale = _auto_downscale(lenses[0], width / (2 * np.pi))
     ds = float(downscale)
 
     container = av.open(str(out), "w", options={"movflags": "+faststart"})
@@ -89,10 +98,9 @@ def render_video(src: Path, lenses: list[FisheyeLens], R_wc: np.ndarray, yaw0: f
     stream.options = {"crf": str(crf), "preset": "medium"}
     tracks = (lenses[0].track, lenses[1].track)
     n = len(R_wc)
-    for idx, _, imgs in iter_frame_pairs(src, tracks):
-        if idx >= n:
-            break
-        rays_rig = d_world @ R_wc[idx]  # R_wc^T d
+    for idx, _, imgs in iter_frame_pairs(src, tracks, start=start, stop=start + n):
+        k = idx - start
+        rays_rig = d_world @ R_wc[k]  # R_wc^T d
         owner = np.argmax(rays_rig @ axes.T, axis=1)
         frame = np.zeros((h * width, 3), np.uint8)
         for li, L in enumerate(lenses):
@@ -117,10 +125,14 @@ def render_video(src: Path, lenses: list[FisheyeLens], R_wc: np.ndarray, yaw0: f
 
 
 def build(work: Path, src: Path, tel: Telemetry, lenses: list[FisheyeLens],
-          width: int = 1920, max_points: int = 200_000) -> Path:
+          width: int = 1920, max_points: int = 200_000,
+          frame_range: tuple[int, int] | None = None) -> Path:
     out = work / "viewer"
     out.mkdir(exist_ok=True)
-    t_frames = read_tracks(src)[0].frame_times
+    t_all = read_tracks(src)[0].frame_times
+    i0, i1 = frame_range or (0, len(t_all))
+    t_frames = t_all[i0:i1]
+    t0 = float(t_frames[0])  # the viewer video starts here
     pos, q, tk = frame_poses(work, tel, t_frames)
     R_wc = Rotation.from_quat(q).as_matrix()
 
@@ -135,7 +147,11 @@ def build(work: Path, src: Path, tel: Telemetry, lenses: list[FisheyeLens],
     ground = ground_height(pts, pos)
 
     travel = pos[-1, :2] - pos[0, :2]
-    yaw0 = float(np.arctan2(travel[1], travel[0]))  # video centre = overall walking direction
+    if np.linalg.norm(travel) > 0.3:  # video centre = overall direction of travel
+        yaw0 = float(np.arctan2(travel[1], travel[0]))
+    else:  # barely moved: use the mean horizontal heading of lens 0
+        fwd = Rotation.from_quat(q).apply([0, 0, 1])[:, :2].mean(axis=0)
+        yaw0 = float(np.arctan2(fwd[1], fwd[0]))
 
     (out / "cloud.bin").write_bytes(pts.astype("<f4").tobytes() + cols.astype("u1").tobytes())
     fusion = json.loads((work / "fusion.json").read_text())
@@ -144,12 +160,13 @@ def build(work: Path, src: Path, tel: Telemetry, lenses: list[FisheyeLens],
         "num_points": int(len(pts)),
         "ground_z": ground,
         "video_centre_yaw": yaw0,
-        "keyframe_times": tk.round(4).tolist(),
-        "t": t_frames.round(4).tolist(),
+        "keyframe_times": (tk - t0).round(4).tolist(),  # relative to the viewer video
+        "t": (t_frames - t0).round(4).tolist(),
         "p": pos.round(4).tolist(),
         "q": q.round(6).tolist(),
         "info": {
             "camera": f"{tel.camera} {tel.model}",
+            "clip_start_s": t0,
             "scale": fusion["scale"]["value"],
             "path_length_m": fusion["path_length_m"],
             "registered_frames": fusion["registered_frames"],
@@ -160,6 +177,6 @@ def build(work: Path, src: Path, tel: Telemetry, lenses: list[FisheyeLens],
     (out / "index.html").write_text(html, encoding="utf-8")
 
     print(f"Viewer: rendering levelled 360 video ({width}x{width // 2})")
-    render_video(src, lenses, R_wc, yaw0, out / "video.mp4", width=width)
+    render_video(src, lenses, R_wc, yaw0, out / "video.mp4", width=width, start=i0)
     print(f"  wrote {out}")
     return out

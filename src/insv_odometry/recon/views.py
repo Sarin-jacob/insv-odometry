@@ -134,11 +134,22 @@ def equirect(images: list[np.ndarray], lenses: list[FisheyeLens], width: int = 2
     return out
 
 
+def auto_downscale(lens: FisheyeLens, target_px_per_rad: float) -> int:
+    """Integer area-downscale so the fisheye centre is not much sharper than the target."""
+    centre_px_per_rad = lens.fx / (1.0 + lens.xi)
+    return max(1, int(centre_px_per_rad / target_px_per_rad))
+
+
 def render(path: str | Path, lenses: list[FisheyeLens], views: list[VirtualView],
            out_dir: Path, step: int, quality: int = 95, check_every: int = 0,
-           downscale: int = 2, max_frames: int | None = None) -> list[dict]:
-    """Write images/<view>/frame_XXXXX.jpg and masks; the fisheye is first area-downscaled
-    by `downscale` so the bilinear remap does not alias."""
+           downscale: int | None = None, max_frames: int | None = None,
+           start: int = 0, stop: int | None = None) -> list[dict]:
+    """Write images/<view>/frame_XXXXX.jpg and masks for video frames [start, stop) every `step`.
+
+    The fisheye is first area-downscaled (auto: matched to the view focal) so the bilinear
+    remap does not alias."""
+    if downscale is None:
+        downscale = auto_downscale(lenses[0], views[0].focal)
     img_dir, mask_dir = out_dir / "images", out_dir / "masks"
     for v in views:
         (img_dir / v.name).mkdir(parents=True, exist_ok=True)
@@ -147,8 +158,9 @@ def render(path: str | Path, lenses: list[FisheyeLens], views: list[VirtualView]
     ds = float(downscale)
     maps = {v.name: ((v.map_x + 0.5) / ds - 0.5, (v.map_y + 0.5) / ds - 0.5) for v in views}
     rows = []
-    stop = None if max_frames is None else max_frames * step
-    for idx, t, imgs in iter_frame_pairs(path, tracks, step=step, stop=stop):
+    if max_frames is not None:
+        stop = start + max_frames * step if stop is None else min(stop, start + max_frames * step)
+    for idx, t, imgs in iter_frame_pairs(path, tracks, step=step, start=start, stop=stop):
         fname = f"frame_{idx:05d}.jpg"
         small = [cv2.resize(im, None, fx=1 / ds, fy=1 / ds, interpolation=cv2.INTER_AREA)
                  if downscale > 1 else im for im in imgs]

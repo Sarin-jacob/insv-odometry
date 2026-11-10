@@ -56,6 +56,8 @@ uv run --extra recon insv-odometry recon path/to/VID_XXXXXXXX_XXXXXX_00_XXX.insv
 ```
 
 Options:
+- `--start S --end E`: only reconstruct video time S..E seconds. Work goes to
+  `out/<stem>/recon_<S>-<E>s/`, and the viewer video covers just that window.
 - `--step N`: use every Nth video frame (default 6, which is 5 fps)
 - `--size`: virtual view size in px (default 768)
 - `--max-features`, `--overlap`: SfM feature count and sequential matching overlap
@@ -63,7 +65,9 @@ Options:
 - `--stages render,sfm,fuse,viewer`: run only some stages; later stages reuse the work folder
 - `--video-width`: width of the viewer's 360 video (default 1920)
 
-The pipeline is CPU-only (pycolmap wheel, no CUDA). Work goes to `out/<stem>/recon/`.
+The pipeline is CPU-only (pycolmap wheel, no CUDA). Work goes to `out/<stem>/recon/` (or
+`recon_<S>-<E>s/` with a time window). The fisheye downscale before reprojection adapts to the
+track resolution (3840 or 1920 px).
 
 1. **render.** Both fisheye tracks are decoded and reprojected into **10 virtual pinhole views**
    (5 per lens: centre + 4 tilted 50°, 90° FOV) using the factory lens model.
@@ -78,10 +82,19 @@ The pipeline is CPU-only (pycolmap wheel, no CUDA). Work goes to `out/<stem>/rec
    - incremental mapping with fixed intrinsics and rig
 3. **fuse.** IMU fusion (`fusion.json`, `fusion.png`, `cloud.png`):
    - IMU↔video **time offset**: minimise per-step rotation-angle mismatch, SfM vs gyro
-   - **camera→IMU rotation**: Kabsch on per-step rotation vectors
-   - **gravity alignment**: Z up, from the gravity-corrected IMU orientation
+     (truncated cost, robust to bad steps)
+   - **camera→IMU rotation**: Kabsch on per-step rotation vectors, refitted on inlier steps
+   - **consistency check**: the SfM is cut at any step that disagrees with the gyro by >10°
+     (a bad registration). Inside each piece, it keeps the longest stretch whose accumulated
+     SfM↔gyro misalignment stays within 15°, which catches slow systematic drift. Dropped
+     time ranges are listed in `fusion.json`.
+   - **gravity alignment**: Z up, from the IMU gravity direction only. IMU yaw is not used: it
+     drifts with gyro bias and there is no magnetometer.
    - **metric scale + accel bias**: second differences of SfM positions equal the
-     triangle-weighted mean of IMU world acceleration, which gives an exact linear fit
+     triangle-weighted mean of IMU world acceleration, which gives an exact linear fit.
+     The IMU scale is used only if the camera accelerated clearly (signal ≥ 0.15 m/s² and fit
+     R² ≥ 0.5). Otherwise the SfM scale from the fixed 3.35 cm lens offset is kept, recorded
+     as `scale.source = rig_baseline`.
 
 4. **viewer.** A side-by-side web viewer in `out/<stem>/recon/viewer/`:
    - **Left:** the 360 video, levelled and world-locked using the fused poses (horizon flat,
@@ -125,8 +138,10 @@ or a larger `--step`.
 - **Dense** (CPU): OpenMVS densify and mesh on the posed views. COLMAP PatchMatch MVS and Gaussian
   splatting need CUDA, so they are deferred to a GPU host.
 - Rolling-shutter correction from the gyro (15.9 ms readout). The pipeline currently ignores it.
-- Tighter gravity alignment: per-frame alignment spread is 1.9° median, coming from Mahony tilt
+- Tighter gravity alignment: per-frame tilt spread is 1.9° median, coming from Mahony tilt
   error during walking.
+- IMU rotation priors in bundle adjustment, to stop the slow SfM rotation drift seen underwater
+  instead of only detecting it.
 
 ### Dive lens / underwater footage
 
@@ -140,3 +155,23 @@ hold.
   distortion per lens (self-calibration), and keep the rig rotation fixed.
 - If self-calibration is unstable (low texture, turbid water), calibrate once with a checkerboard
   filmed underwater through the dive lens and use that model instead.
+
+#### Underwater results (X4 Air, 2026-11-10, dive housing, lens mode `Common`)
+
+The factory air calibration still stitches cleanly underwater: the boulder edge, the edge of the
+bright patch where light enters through the surface, and the cable all continue across both
+seams. So the pipeline keeps the factory model.
+
+| | clip 032, 21–99 s (`--step 15`) | clip 028, 0–29 s |
+|---|---|---|
+| tracks | 2 × 1920², 120 s clip | 2 × 3840² |
+| registration | 155/156 frames, 21k points, 1.00 px | 145/145 frames, 53k points, 1.35 px |
+| kept consistent segment | 39.5–94.1 s (110 frames) | 0.0–26.0 s (131 frames) |
+| rotation agreement (kept) | 0.28° median, 1.1° max per step | see `fusion.json` |
+| why frames were dropped | 21.5–28.5 s mis-registered (43° jump); 29–39 s drifted ~3°/step (44° total) | 26.2–28.8 s drift |
+| scale | lens offset (IMU unobservable: camera nearly still, 0.04 m/s²) | lens offset (IMU fit R² 0.40) |
+
+Scale caveat for underwater clips: neither scale source is reliable here. The IMU signal is
+too weak. The dive housing may also shift each lens's effective optical centre, which changes
+the 3.35 cm baseline the SfM scale relies on. To get metres you can trust, measure one object
+in the scene (for example the wooden frame) and rescale.

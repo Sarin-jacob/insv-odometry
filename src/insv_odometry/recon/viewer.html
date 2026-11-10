@@ -198,8 +198,10 @@ function setFrame(i) {
   arrow.position.set(p[0], p[1], p[2]);
   done.geometry.setDrawRange(0, idx + 1);
   const isKey = data.keyframe_times.some((t) => Math.abs(t - data.t[idx]) < 0.017);
-  $("hud").innerHTML = `<span>t <b>${data.t[idx].toFixed(2)} s</b></span>
-    <span>frame <b>${idx}</b>${isKey ? ' <span style="color:var(--ok)">SfM keyframe</span>' : ' <span>gyro-interpolated</span>'}</span>
+  const kt = data.keyframe_times, outside = data.t[idx] < kt[0] - 0.02 || data.t[idx] > kt[kt.length - 1] + 0.02;
+  const clip = (info.clip_start_s || 0) + data.t[idx];
+  $("hud").innerHTML = `<span>t <b>${clip.toFixed(2)} s</b> in clip</span>
+    <span>frame <b>${idx}</b>${outside ? ' <span style="color:var(--warn)">outside SfM segment: position held, gyro rotation</span>' : isKey ? ' <span style="color:var(--ok)">SfM keyframe</span>' : ' <span>gyro-interpolated</span>'}</span>
     <span>x <b>${p[0].toFixed(2)}</b> y <b>${p[1].toFixed(2)}</b> m</span>
     <span>height <b>${(p[2] - data.ground_z).toFixed(2)} m</b> above ground</span>`;
 }

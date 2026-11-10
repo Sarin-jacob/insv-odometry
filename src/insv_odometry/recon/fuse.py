@@ -56,13 +56,13 @@ def _imu_R(t_imu, q_wxyz, t):
     return orientation.to_scipy(orientation.resample(t_imu, q_wxyz, t)).as_matrix()
 
 
-def estimate_time_offset(t_imu, q_gyro, t, R_sc, search=0.3, step=0.001):
+def estimate_time_offset(t_imu, q_gyro, t, R_sc, search=0.3, step=0.001, cap=np.radians(5)):
     ang_s = np.linalg.norm(_rel_rotvecs(R_sc), axis=1)
     dts = np.arange(-search, search + step / 2, step)
     cost = []
     for dt in dts:
         ang_i = np.linalg.norm(_rel_rotvecs(_imu_R(t_imu, q_gyro, t + dt)), axis=1)
-        cost.append(np.mean((ang_s - ang_i) ** 2))
+        cost.append(np.mean(np.minimum((ang_s - ang_i) ** 2, cap**2)))  # truncated: robust
     cost = np.array(cost)
     k = int(np.argmin(cost))
     dt = dts[k]
@@ -80,6 +80,41 @@ def kabsch(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     U, _, Vt = np.linalg.svd(H)
     D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))])
     return Vt.T @ D @ U.T
+
+
+def robust_hand_eye(r_c: np.ndarray, r_i: np.ndarray, iters: int = 3):
+    """Kabsch on per-step rotation vectors, re-fitted on inlier steps. Returns (R_ic, resid_deg, inl)."""
+    inl = np.ones(len(r_c), bool)
+    for _ in range(iters):
+        R_ic = kabsch(r_c[inl], r_i[inl])
+        resid = np.degrees(np.linalg.norm(r_i - r_c @ R_ic.T, axis=1))
+        inl = resid < max(1.0, 3 * np.median(resid))
+    return R_ic, resid, inl
+
+
+def consistent_segments(resid_deg: np.ndarray, break_deg: float = 10.0) -> list[tuple[int, int]]:
+    """Split frames [0, n) at steps whose SfM-vs-gyro disagreement exceeds `break_deg`.
+    Returns (first, last_exclusive) frame ranges, longest first."""
+    breaks = np.nonzero(resid_deg > break_deg)[0]  # step k joins frames k and k+1
+    edges = [0, *(breaks + 1).tolist(), len(resid_deg) + 1]
+    segs = [(a, b) for a, b in zip(edges[:-1], edges[1:]) if b - a >= 2]
+    return sorted(segs, key=lambda ab: ab[1] - ab[0], reverse=True)
+
+
+def longest_drift_free(R_sc: np.ndarray, R_i: np.ndarray, R_ic: np.ndarray, lo: int, hi: int,
+                       max_drift_deg: float) -> tuple[int, int]:
+    """Longest [a, b) within [lo, hi) where the SfM<->IMU misalignment stays within
+    `max_drift_deg` of its value at frame a (catches slow systematic SfM rotation drift)."""
+    M = Rotation.from_matrix(R_sc[lo:hi] @ R_ic.T @ np.transpose(R_i[lo:hi], (0, 2, 1)))
+    n = hi - lo
+    best = (0, min(1, n))
+    for a in range(n):
+        ang = np.degrees((M[a:] * M[a].inv()).magnitude())
+        bad = np.nonzero(ang >= max_drift_deg)[0]
+        b = a + (bad[0] if len(bad) else n - a)
+        if b - a > best[1] - best[0]:
+            best = (a, b)
+    return lo + best[0], lo + best[1]
 
 
 def triangle_mean(t_imu, values, centres, h):
@@ -109,7 +144,7 @@ def run(work: Path, rec: pycolmap.Reconstruction, tel: Telemetry,
     with (work / "frames.csv").open() as f:
         frame_times = {int(r["frame"]): float(r["t_s"]) for r in csv.DictReader(f)}
     t, fidx, R_sc, c_s = sfm_poses(rec, f"{views[0].name}/", frame_times)
-    n = len(t)
+    n = n_reg = len(t)
     print(f"Fusion: {n} registered rig frames of {len(frame_times)}")
     if n < 10:
         raise RuntimeError("too few registered frames for IMU fusion")
@@ -121,20 +156,51 @@ def run(work: Path, rec: pycolmap.Reconstruction, tel: Telemetry,
     dt, dts, cost = estimate_time_offset(tel.t, q_gyro, t, R_sc)
     ti = t + dt
 
-    # 2. hand-eye rotation (camera -> IMU)
+    # 2. hand-eye rotation (camera -> IMU), robust; then keep the longest SfM segment that
+    #    agrees with the gyro (a bad registration shows up as a big one-step rotation jump)
     r_c = _rel_rotvecs(R_sc)
     r_i = _rel_rotvecs(_imu_R(tel.t, q_gyro, ti))
-    R_ic = kabsch(r_c, r_i)
-    resid = np.degrees(np.linalg.norm(r_i - r_c @ R_ic.T, axis=1))
+    R_ic, resid, _ = robust_hand_eye(r_c, r_i)
+    # (a) break at gross single-step disagreements (a bad registration), then (b) inside each
+    # piece keep the longest stretch without slow systematic drift (seen underwater: ~3 deg/step
+    # for 10 s adding up to 44 deg, while each step looked plausible).
+    R_i_frames = _imu_R(tel.t, q_gyro, ti)
+    break_deg, max_drift_deg = 10.0, 15.0
+    cands = [longest_drift_free(R_sc, R_i_frames, R_ic, x, y, max_drift_deg)
+             for x, y in consistent_segments(resid, break_deg)]
+    a, b = max(cands, key=lambda ab: ab[1] - ab[0])
+    dropped = []
+    if a > 0:
+        dropped.append((float(t[0]), float(t[a - 1]), int(a)))
+    if b < n:
+        dropped.append((float(t[b]), float(t[-1]), int(n - b)))
+    if (a, b) != (0, n):
+        print(f"  keeping consistent segment {t[a]:.2f}-{t[b - 1]:.2f} s ({b - a}/{n} frames); "
+              f"dropped {dropped}")
+        t, fidx, R_sc, c_s = t[a:b], fidx[a:b], R_sc[a:b], c_s[a:b]
+        ti = ti[a:b]
+        r_c, r_i = r_c[a : b - 1], r_i[a : b - 1]
+        R_ic, resid, _ = robust_hand_eye(r_c, r_i)
+        n = len(t)
     step_ang = np.degrees(np.linalg.norm(r_i, axis=1))
 
     # 3. gravity alignment: R_gc = R_gi R_ic, R_gs = R_gc R_sc^T
     R_gi = _imu_R(tel.t, q_imu, ti)
     R_gc = R_gi @ R_ic
     R_gs_all = Rotation.from_matrix(R_gc @ np.transpose(R_sc, (0, 2, 1)))
-    R_gs_rot = R_gs_all.mean()
-    R_gs = R_gs_rot.as_matrix()
-    align_spread = np.degrees((R_gs_all * R_gs_rot.inv()).magnitude())
+    R_gs_rot = R_gs_all.mean()  # gives a sensible yaw; tilt is refined below
+    # Only the gravity direction is observable: IMU yaw drifts (no magnetometer, gyro bias), so
+    # align the SfM "up" vectors (IMU gravity seen through each SfM camera) and leave yaw free.
+    up_s = np.einsum("nij,nj->ni", R_sc @ np.transpose(R_gc, (0, 2, 1)), np.tile([0, 0, 1.0], (n, 1)))
+    inl = np.ones(n, bool)
+    for _ in range(3):  # robust mean direction (drop bumps / bad frames)
+        u = up_s[inl].mean(axis=0)
+        u /= np.linalg.norm(u)
+        align_spread = np.degrees(np.arccos(np.clip(up_s @ u, -1, 1)))
+        inl = align_spread < max(1.0, 3 * np.median(align_spread))
+    u_g = R_gs_rot.apply(u)
+    tilt_fix, _ = Rotation.align_vectors([[0, 0, 1.0]], [u_g])
+    R_gs = (tilt_fix * R_gs_rot).as_matrix()
     p_g = c_s @ R_gs.T  # unscaled positions in gravity world
 
     # 4. scale + accel bias, on uniformly spaced consecutive triples only
@@ -163,6 +229,17 @@ def run(work: Path, rec: pycolmap.Reconstruction, tel: Telemetry,
     except np.linalg.LinAlgError:
         s_std = float("nan")
 
+    # The IMU only observes scale if the camera accelerated well above the noise. Otherwise keep
+    # the SfM scale, which the fixed lens-to-lens offset (3.35 cm, in metres) already sets.
+    r2 = 1 - (acc_rms / acc_sig) ** 2 if acc_sig > 0 else 0.0
+    s_imu = s
+    if acc_sig < 0.15 or r2 < 0.5 or not np.isfinite(s) or s <= 0:
+        s, scale_source = 1.0, "rig_baseline"
+        print(f"  IMU scale not observable (accel signal {acc_sig:.3f} m/s^2, fit R^2 {r2:.2f}); "
+              "keeping the SfM scale from the fixed lens offset")
+    else:
+        scale_source = "imu"
+
     p_m = s * p_g
     path_len = float(np.sum(np.linalg.norm(np.diff(p_m, axis=0), axis=1)))
 
@@ -175,14 +252,20 @@ def run(work: Path, rec: pycolmap.Reconstruction, tel: Telemetry,
             f.write(f"{t[k]:.6f} {p_m[k, 0]:.5f} {p_m[k, 1]:.5f} {p_m[k, 2]:.5f} "
                     + " ".join(f"{v:.8f}" for v in q_sfm[k]) + "\n")
 
-    pts = np.array([p.xyz for p in rec.points3D.values()])
-    cols = np.array([p.color for p in rec.points3D.values()], dtype=np.uint8)
-    errs = np.array([p.error for p in rec.points3D.values()])
-    keep = errs < 2.0
+    kept_frames = set(int(f) for f in fidx)
+    kept_imgs = {i for i, im in rec.images.items()
+                 if int(_FRAME_RE.search(im.name).group(1)) in kept_frames}
+    P3 = list(rec.points3D.values())
+    pts = np.array([p.xyz for p in P3])
+    cols = np.array([p.color for p in P3], dtype=np.uint8)
+    errs = np.array([p.error for p in P3])
+    seen = np.array([sum(e.image_id in kept_imgs for e in p.track.elements) for p in P3])
+    keep = (errs < 2.0) & (seen >= 2)
     write_ply(work / "sparse_points_metric.ply", s * (pts[keep] @ R_gs.T), cols[keep])
 
     res = {
-        "registered_frames": int(n),
+        "registered_frames": int(n_reg),
+        "frames_used": int(n),
         "total_frames": len(frame_times),
         "sfm_points": int(len(pts)),
         "sfm_mean_reproj_px": float(rec.compute_mean_reprojection_error()),
@@ -195,10 +278,16 @@ def run(work: Path, rec: pycolmap.Reconstruction, tel: Telemetry,
                                   "median": float(np.median(resid)), "max": float(resid.max()),
                                   "mean_step_rotation_deg": float(step_ang.mean())},
         "gravity_alignment_spread_deg": {"median": float(np.median(align_spread)),
-                                         "max": float(align_spread.max())},
-        "scale": {"value": s, "std": s_std,
-                  "note": "SfM units -> metres; SfM is already ~metric if the fixed 3.35 cm "
-                          "lens offset constrained it, then s ~ 1"},
+                                         "p90": float(np.percentile(align_spread, 90)),
+                                         "max": float(align_spread.max()),
+                                         "note": "tilt only (angle between per-frame up vectors)"},
+        "scale": {"value": s, "source": scale_source, "imu_estimate": s_imu, "imu_std": s_std,
+                  "accel_fit_r2": r2,
+                  "note": "rig_baseline = SfM scale from the fixed 3.35 cm lens offset (used when "
+                          "the camera did not accelerate enough for the IMU to observe scale)"},
+        "kept_segment_s": [float(t[0]), float(t[-1])],
+        "segment_rule": {"break_step_deg": break_deg, "max_drift_deg": max_drift_deg},
+        "dropped_segments_s": dropped,
         "accel_bias_m_s2": bias.tolist(),
         "accel_fit": {"rms_residual_m_s2": acc_rms, "rms_signal_m_s2": acc_sig,
                       "samples": int(len(ok))},

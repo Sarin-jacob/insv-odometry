@@ -115,6 +115,21 @@ track resolution (3840 or 1920 px).
 Outputs: `trajectory_metric_tum.txt` (lens-0 camera, metres, Z up), `sparse_points_metric.ply`,
 `sparse_best/` (COLMAP model), `fusion.json`, `viewer/`.
 
+### Flat video of a subject the camera circles
+
+```bash
+uv run --extra recon insv-odometry flat clip.insv -o out_folder --start 21 --end 99
+```
+
+Renders a level, rectilinear video that follows the heading of one lens (default: lens 1, the
+back lens) while the camera orbits a subject. The view is smoothed over 1 s, levelled with the
+IMU gravity direction and tilted up (`--tilt`, default 8 degrees). It also writes, all named
+after the clip:
+- `<clip>_flat_<S>-<E>s.mp4`
+- `<clip>_imu_raw.csv`: every IMU sample of the clip as decoded by telemetry-parser, in deg/s
+  and g, with no bias removal, filtering, rotation or resampling
+- `<clip>_frames_<S>-<E>s.csv`: frame times and camera exposure per output frame
+
 ### Results on the test clip (X4 Air, 15.3 s, walking with the camera hand-held)
 
 | check | result |

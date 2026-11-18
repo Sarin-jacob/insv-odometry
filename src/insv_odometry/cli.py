@@ -137,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
         r.set_defaults(func=lambda a: sys.exit("Install the recon extra: uv sync --extra recon"))
     else:
         pipeline.add_parser(sub)
+        from .recon import flat
+
+        flat.add_parser(sub)
 
     args = ap.parse_args(argv)
     return args.func(args)
